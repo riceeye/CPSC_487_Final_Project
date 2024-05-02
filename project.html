@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>CPSC 487/587</title>
+    <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/lil-gui@0.19.1/dist/lil-gui.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/10.3.0/math.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/quaternion@1.5.1/quaternion.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/numeric@1.2.6/numeric-1.2.6.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/stats.js@0.17.0/build/stats.min.js"></script>
+    <script type="importmap">
+        {
+            "imports": {
+              "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+              "three/": "https://unpkg.com/three@0.160.0/"
+            }
+        }
+    </script>
+</head>
+<body>
+<script type="module">
+    import {ThreeEngine, get_default_lil_gui, refresh_displays} from "./js/utils/utils_three.js";
+    import {XArm7Robot} from "./js/utils/utils_robot.js";
+    import {TransformGizmoEngine} from "./js/utils/utils_transform_gizmo.js";
+    import {identity_matrix, mul_matrix_matrix, mul_matrix_scalar, add_matrix_matrix} from "./js/utils/utils_math.js";
+    import {optimization_solve} from "./js/utils/utils_optimization.js";
+
+    //--------------------------------- HELPER FUNCTIONS -------------------------------//
+    function matrix_inverse_3x3(A) {
+        let det = A[0][0] * (A[1][1] * A[2][2] - A[2][1] * A[1][2]) -
+            A[0][1] * (A[1][0] * A[2][2] - A[1][2] * A[2][0]) +
+            A[0][2] * (A[1][0] * A[2][1] - A[1][1] * A[2][0]);
+
+        if (det === 0) {
+            return null; // No inverse exists if determinant is 0
+        }
+
+        let cofactors = [
+            [
+                (A[1][1] * A[2][2] - A[2][1] * A[1][2]),
+                -(A[1][0] * A[2][2] - A[1][2] * A[2][0]),
+                (A[1][0] * A[2][1] - A[2][0] * A[1][1])
+            ],
+            [
+                -(A[0][1] * A[2][2] - A[0][2] * A[2][1]),
+                (A[0][0] * A[2][2] - A[0][2] * A[2][0]),
+                -(A[0][0] * A[2][1] - A[2][0] * A[0][1])
+            ],
+            [
+                (A[0][1] * A[1][2] - A[0][2] * A[1][1]),
+                -(A[0][0] * A[1][2] - A[1][0] * A[0][2]),
+                (A[0][0] * A[1][1] - A[1][0] * A[0][1])
+            ]
+        ];
+
+        let adjugate = [
+            [cofactors[0][0] / det, cofactors[1][0] / det, cofactors[2][0] / det],
+            [cofactors[0][1] / det, cofactors[1][1] / det, cofactors[2][1] / det],
+            [cofactors[0][2] / det, cofactors[1][2] / det, cofactors[2][2] / det]
+        ];
+
+        return adjugate;
+    }
+
+    function SE3_create(R, t) {
+        return [[R[0][0], R[0][1], R[0][2], t[0]],
+            [R[1][0], R[1][1], R[1][2], t[1]],
+            [R[2][0], R[2][1], R[2][2], t[2]],
+            [0, 0, 0, 1]];
+    }
+
+    function SE3_displacement(a, b) {
+        let R_T = [[a[0][0], a[1][0], a[2][0]],
+            [a[0][1], a[1][1], a[2][1]],
+            [a[0][2], a[1][2], a[2][2]]];
+        let t_neg = [[-a[0][3]], [-a[1][3]], [-a[2][3]]];
+        let a_inv = SE3_create(R_T, mul_matrix_matrix(R_T, t_neg));
+
+        return mul_matrix_matrix(a_inv, b);
+    }
+
+    function SE3_log(M, epsilon = 0.0001) {
+        let R = [[M[0][0], M[0][1], M[0][2]],
+            [M[1][0], M[1][1], M[1][2]],
+            [M[2][0], M[2][1], M[2][2]]];
+        let t = [[M[0][3]], [M[1][3]], [M[2][3]]];
+
+        let R_T = [[M[0][0], M[1][0], M[2][0]],
+            [M[0][1], M[1][1], M[2][1]],
+            [M[0][2], M[1][2], M[2][2]]];
+
+        let beta = Math.acos(0.5 * (M[0][0] + M[1][1] + M[2][2] - 1));
+
+        let A;
+        if (Math.abs(beta) < epsilon) {
+            A = mul_matrix_scalar(add_matrix_matrix(R, mul_matrix_scalar(R_T, -1)), 0.5 + Math.pow(beta, 2) / 12 + 7*Math.pow(beta, 4) / 720);
+        }
+        else if (Math.abs(beta - Math.PI) < epsilon) {
+            let d1 = Math.PI * Math.sqrt(0.5 * (R[0][0] + 1));
+            let d2 = Math.PI * Math.sqrt(0.5 * (R[1][1] + 1));
+            let d3 = Math.PI * Math.sqrt(0.5 * (R[2][2] + 1));
+
+            A = [[0, -d3, d2],
+                [d3, 0, -d1],
+                [-d2, d1, 0]];
+        }
+        else {
+            A = mul_matrix_scalar(add_matrix_matrix(R, mul_matrix_scalar(R_T, -1)), beta / (2 * Math.sin(beta)));
+        }
+
+        let q, r;
+        if (beta < epsilon) {
+            q = 0.5 - Math.pow(beta, 2) / 24 + Math.pow(beta, 4) / 720;
+            r = 1/6 - Math.pow(beta, 2) / 120 + Math.pow(beta, 4) / 5040;
+        }
+        else {
+            q = (1 - Math.cos(beta)) / Math.pow(beta, 2);
+            r = (beta - Math.sin(beta)) / Math.pow(beta, 3);
+        }
+
+        let b = mul_matrix_matrix(matrix_inverse_3x3(add_matrix_matrix(add_matrix_matrix(identity_matrix(3), mul_matrix_scalar(A, q)), mul_matrix_scalar(mul_matrix_matrix(A, A), r))), t);
+
+        let temp = SE3_create(A, b);
+        temp[3][3] = 0;
+        return temp;
+    }
+
+    function se3_exponential(M, epsilon = 0.0001) {
+        let A = [[M[0][0], M[0][1], M[0][2]],
+                [M[1][0], M[1][1], M[1][2]],
+                [M[2][0], M[2][1], M[2][2]]];
+        let b = [[M[0][3]], [M[1][3]], [M[2][3]]];
+
+        let beta = Math.sqrt(Math.pow(M[2][1], 2) + Math.pow(M[0][2], 2) + Math.pow(M[1][0], 2));
+
+        let p, q, r;
+        if(beta < epsilon) {
+            p = 1 - Math.pow(beta, 2) / 6 + Math.pow(beta, 4) / 120;
+            q = 1/2 - Math.pow(beta, 2) / 24 + Math.pow(beta, 4) / 720;
+            r = 1/6 - Math.pow(beta, 2) / 120 + Math.pow(beta, 4) / 5040;
+        }
+        else {
+            p = Math.sin(beta) / beta;
+            q = (1 - Math.cos(beta)) / Math.pow(beta, 2);
+            r = (beta - Math.sin(beta)) / Math.pow(beta, 3);
+        }
+
+        let R = add_matrix_matrix(add_matrix_matrix(identity_matrix(3), mul_matrix_scalar(A, p)), mul_matrix_scalar(mul_matrix_matrix(A, A), q));
+        let t = mul_matrix_matrix(add_matrix_matrix(add_matrix_matrix(identity_matrix(3), mul_matrix_scalar(A, q)), mul_matrix_scalar(mul_matrix_matrix(A, A), r)), b);
+
+        return SE3_create(R, t);
+    }
+
+    function SE3_squared_distance(a, b) {
+        let log_disp = SE3_log(SE3_displacement(a, b));
+
+        return Math.pow(log_disp[2][1], 2)
+            + Math.pow(log_disp[0][2], 2)
+            + Math.pow(log_disp[1][0], 2)
+            + Math.pow(log_disp[0][3], 2)
+            + Math.pow(log_disp[1][3], 2)
+            + Math.pow(log_disp[2][3], 2);
+    }
+
+    function SO3_create(v, epsilon=0.0001) {
+        let A = [[0, -v[2], v[1]],
+            [v[2], 0, -v[0]],
+            [-v[1], v[0], 0]];
+
+        let beta = Math.sqrt(Math.pow(v[0], 2) + Math.pow(v[1], 2) + Math.pow(v[2], 2));
+        let p, q;
+        if (beta < epsilon) {
+            p = 1 - Math.pow(beta, 2) / 6 + Math.pow(beta, 4) / 120;
+            q = 0.5 - Math.pow(beta, 2) / 24 + Math.pow(beta, 4) / 720;
+        }
+        else {
+            p = Math.sin(beta) / beta;
+            q = (1 - Math.cos(beta)) / Math.pow(beta, 2);
+        }
+
+        return add_matrix_matrix(add_matrix_matrix(identity_matrix(3), mul_matrix_scalar(A, p)), mul_matrix_scalar(mul_matrix_matrix(A, A), q));
+    }
+
+    function Tv_create_revolute(angle, axis, epsilon=0.0001) {
+        let r = SO3_create(mul_matrix_scalar(axis, angle));
+
+        return [[r[0][0], r[0][1], r[0][2], 0],
+            [r[1][0], r[1][1], r[1][2], 0],
+            [r[2][0], r[2][1], r[2][2], 0],
+            [0, 0, 0, 1]];
+    }
+
+    function Tv_create_prismatic(angle, axis) {
+        return [[1, 0, 0, angle*axis[0]],
+            [0, 1, 0, angle*axis[1]],
+            [0, 0, 1, angle*axis[2]],
+            [0, 0, 0, 1]];
+    }
+
+    function Tv_create_floating(rotation, translation, epsilon=0.0001) {
+        let r = SO3_create(rotation);
+        return [[r[0][0], r[0][1], r[0][2], translation[0]],
+            [r[1][0], r[1][1], r[1][2], translation[1]],
+            [r[2][0], r[2][1], r[2][2], translation[2]],
+            [0, 0, 0, 1]];
+    }
+
+    function robot_fk(state) {
+        let fk_poses = [];
+        for(let i = 0; i < links.length; i++) {
+            fk_poses.push( identity_matrix(4) );
+        }
+
+        kh.forEach(layer => {
+            layer.forEach(link_idx => {
+                let curr_link = links[link_idx];
+                let parent_link_idx = curr_link.parent_link_idx;
+                let parent_joint_idx = curr_link.parent_joint_idx;
+                if(parent_joint_idx === null) {
+                    return;
+                }
+                let curr_joint = joints[parent_joint_idx];
+                let joint_type = curr_joint.joint_type_string;
+
+                let curr_pose = fk_poses[parent_link_idx];
+                let T_c = curr_joint.xyz_rpy_SE3_matrix;
+                curr_pose = mul_matrix_matrix(curr_pose, T_c);
+
+                let T_v = identity_matrix(4);
+                if(joint_type === 'revolute') {
+                    let joint_value = state[curr_joint.dof_idx];
+                    let axis = curr_joint.axis;
+                    T_v = Tv_create_revolute(joint_value, axis);
+                }
+                else if(joint_type === 'prismatic') {
+                    let joint_value = state[curr_joint.dof_idx];
+                    let axis = curr_joint.axis;
+                    T_v = Tv_create_prismatic(joint_value, axis);
+                }
+                else if(joint_type === 'floating') {
+                    let rd = curr_joint.rotation_dof_idxs;
+                    let td = curr_joint.translation_dof_idxs;
+
+                    let rv = [ state[rd[0]], state[rd[1]], state[rd[2]] ];
+                    let tv = [ state[rd[0]], state[rd[1]], state[rd[2]] ];
+
+                    T_v = Tv_create_floating(rv, tv);
+                }
+
+                curr_pose = mul_matrix_matrix(curr_pose, T_v);
+
+                fk_poses[link_idx] = curr_pose;
+            });
+        });
+
+        return fk_poses;
+    }
+
+    function SE3_rotation(M) {
+        return [[M[0][0], M[0][1], M[0][2]],
+                [M[1][0], M[1][1], M[1][2]],
+                [M[2][0], M[2][1], M[2][2]]];
+    }
+
+    let engine = ThreeEngine.new_default_3d();
+
+    //--------------------------------- ROBOT -------------------------------//
+    let robot = new XArm7Robot();
+    robot.spawn_robot(engine);
+
+    let links = robot.links;
+    let joints = robot.joints;
+    let kh = robot.kinematic_hierarchy;
+
+    let init_state = [0,0,-1.571,0,0,0,0,0];
+    let prev_state = [0,0,-1.571,0,0,0,0,0];
+
+    let gizmo_rotation = SE3_rotation(robot_fk(init_state)[19]);
+
+    //--------------------------------- GIZMOS -------------------------------//
+    let tge = new TransformGizmoEngine(engine);
+    tge.add_gizmo_SO3_matrix_and_position(engine, gizmo_rotation, [[0.5], [-0.5], [0.5]], 0.5);
+    tge.add_gizmo_SO3_matrix_and_position(engine, gizmo_rotation, [[0.5], [0.5], [0.5]], 0.5);
+
+    //--------------------------------- GUI -------------------------------//
+    let gui = get_default_lil_gui();
+    let settings = {
+        t: 0.0,
+        toggle: false,
+        play: false
+    }
+    let actions = {
+        toggle_gizmos: function() {
+            settings.toggle = true
+        },
+        play_animation: function() {
+            settings.play = true;
+        },
+        stop_animation: function() {
+            settings.play = false;
+        }
+    }
+
+    gui.add(settings, 't', 0, 1);
+    gui.add(actions, 'toggle_gizmos').name('Toggle Gizmo Transform Mode');
+    gui.add(actions, 'play_animation').name('Play Animation');
+    gui.add(actions, 'stop_animation').name('Stop Animation');
+
+    engine.animation_loop( ()  => {
+        if(settings.toggle === true) {
+            tge.toggle_mode();
+            settings.toggle = false;
+        }
+
+        if(settings.play === true) {
+            settings.t += 0.01;
+            if(settings.t > 1) {
+                settings.t -= 1;
+                prev_state = init_state;
+            }
+            refresh_displays(gui);
+        }
+
+        let start_pose = tge.get_gizmo_pose_as_SE3_matrix(0);
+        let end_pose = tge.get_gizmo_pose_as_SE3_matrix(1);
+
+        let interpolated_pose = mul_matrix_matrix(start_pose, se3_exponential(mul_matrix_scalar(SE3_log(SE3_displacement(start_pose, end_pose)), settings.t)));
+
+        let f = state => {
+            let fk_poses = robot_fk(state);
+            let XArm7_claw_pose = fk_poses[19];
+
+            return SE3_squared_distance(XArm7_claw_pose, interpolated_pose);
+        }
+
+        let res = optimization_solve(f, prev_state, 30, 'bfgs');
+
+        let fk_poses = robot_fk(res);
+        links.forEach(link => robot.set_link_mesh_pose_from_SE3_matrix(engine, link.link_idx, fk_poses[link.link_idx]));
+
+        prev_state = res;
+    });
+
+</script>
+</body>
+</html>
