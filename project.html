@@ -267,7 +267,7 @@
 
     //--------------------------------- ROBOT -------------------------------//
     let robot = new XArm7Robot();
-    robot.spawn_robot(engine);
+    await robot.spawn_robot(engine);
 
     let links = robot.links;
     let joints = robot.joints;
@@ -299,13 +299,19 @@
         },
         stop_animation: function() {
             settings.play = false;
+        },
+        reset_animation: function() {
+            settings.t = 0;
         }
     }
 
     gui.add(settings, 't', 0, 1);
     gui.add(actions, 'toggle_gizmos').name('Toggle Gizmo Transform Mode');
-    gui.add(actions, 'play_animation').name('Play Animation');
-    gui.add(actions, 'stop_animation').name('Stop Animation');
+
+    let animations = gui.addFolder('Animation');
+    animations.add(actions, 'play_animation').name('Play Animation');
+    animations.add(actions, 'stop_animation').name('Stop Animation');
+    animations.add(actions, 'reset_animation').name('Reset Animation');
 
     engine.animation_loop( ()  => {
         if(settings.toggle === true) {
@@ -314,10 +320,10 @@
         }
 
         if(settings.play === true) {
-            settings.t += 0.01;
+            settings.t += 0.005;
             if(settings.t > 1) {
-                settings.t -= 1;
-                prev_state = init_state;
+                settings.t = 1;
+                settings.play = false;
             }
             refresh_displays(gui);
         }
@@ -334,7 +340,7 @@
             return SE3_squared_distance(XArm7_claw_pose, interpolated_pose);
         }
 
-        let res = optimization_solve(f, prev_state, 30, 'bfgs');
+        let res = optimization_solve(f, prev_state, 20, 'bfgs');
 
         let fk_poses = robot_fk(res);
         links.forEach(link => robot.set_link_mesh_pose_from_SE3_matrix(engine, link.link_idx, fk_poses[link.link_idx]));
